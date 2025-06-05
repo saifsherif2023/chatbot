@@ -414,12 +414,16 @@ chatbot_service = ChatbotService()
 
 @app.route('/', methods=['GET'])
 def index():
-    return jsonify({
-        'status': 'running',
-        'service': 'chatbot-service',
-        'version': '1.0.0',
-        'timestamp': datetime.now().isoformat()
-    }), 200
+    try:
+        return jsonify({
+            'status': 'running',
+            'service': 'chatbot-service',
+            'version': '1.0.0',
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in home endpoint: {str(e)}")
+        return jsonify({'error': 'Failed to fetch service status'}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -436,9 +440,13 @@ def chat():
             "timestamp": datetime.now().isoformat()
         })
         
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Recommendation service request failed: {str(req_err)}")
+        return jsonify({"error": "Recommendation service is currently unavailable"}), 503
+    
     except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        return jsonify({"error": "Something went wrong"}), 500
+        logger.error(f"Chat processing error: {str(e)}")
+        return jsonify({"error": "An error occurred while processing your message"}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -462,11 +470,14 @@ def health_check():
             rec_service_url = os.getenv("RECOMMENDATION_SERVICE_URL", "http://localhost:5000")
             rec_service_response = requests.get(f"{rec_service_url}/health", timeout=5)
             rec_service_status = "connected" if rec_service_response.status_code == 200 else "disconnected"
-        except:
+        except requests.exceptions.RequestException as rec_err:
+            logger.error(f"Recommendation service connection error: {str(rec_err)}")
             rec_service_status = "disconnected"
-        
+
+        overall_status = 'healthy' if all(status == "connected" for status in [mongo_status, rec_service_status]) else 'unhealthy'
+
         return jsonify({
-            'status': 'healthy' if all(status == "connected" for status in [mongo_status, rec_service_status]) else 'unhealthy',
+            'status': overall_status,
             'service': 'chatbot-service',
             'timestamp': datetime.now().isoformat(),
             'components': {
@@ -491,39 +502,51 @@ def health_check():
 
 @app.route('/api/info', methods=['GET'])
 def api_info():
-    return jsonify({
-        'service': 'chatbot-service',
-        'capabilities': {
-            'intents': {
-                'greeting': 'Start a conversation',
-                'recommendation': 'Get product recommendations',
-                'price': 'Search by price range',
-                'category': 'Browse by category',
-                'location': 'Find products by location',
-                'artisan': 'Search by artisan',
-                'rating': 'Find highly-rated products',
-                'help': 'Get help and instructions'
+    try:
+        # Safely get product prices if available, else default to 0
+        min_price = float(chatbot_service.products[0]['price']) if chatbot_service.products else 0
+        max_price = float(chatbot_service.products[-1]['price']) if chatbot_service.products else 0
+
+        return jsonify({
+            'service': 'chatbot-service',
+            'capabilities': {
+                'intents': {
+                    'greeting': 'Start a conversation',
+                    'recommendation': 'Get product recommendations',
+                    'price': 'Search by price range',
+                    'category': 'Browse by category',
+                    'location': 'Find products by location',
+                    'artisan': 'Search by artisan',
+                    'rating': 'Find highly-rated products',
+                    'help': 'Get help and instructions'
+                },
+                'example_queries': [
+                    'Show me products under 100 EGP',
+                    'What categories do you have?',
+                    'Show me products from Cairo',
+                    'Who are your artisans?',
+                    'What are your popular items?',
+                    'Show me products in the pottery category'
+                ],
+                'price_ranges': {
+                    'min': min_price,
+                    'max': max_price,
+                    'currency': 'EGP'
+                },
+                'total_products': len(chatbot_service.products),
+                'total_categories': len(chatbot_service.categories),
+                'total_locations': len(chatbot_service.locations),
+                'total_artisans': len(chatbot_service.artisans)
             },
-            'example_queries': [
-                'Show me products under 100 EGP',
-                'What categories do you have?',
-                'Show me products from Cairo',
-                'Who are your artisans?',
-                'What are your popular items?',
-                'Show me products in the pottery category'
-            ],
-            'price_ranges': {
-                'min': float(chatbot_service.products[0]['price']) if chatbot_service.products else 0,
-                'max': float(chatbot_service.products[-1]['price']) if chatbot_service.products else 0,
-                'currency': 'EGP'
-            },
-            'total_products': len(chatbot_service.products),
-            'total_categories': len(chatbot_service.categories),
-            'total_locations': len(chatbot_service.locations),
-            'total_artisans': len(chatbot_service.artisans)
-        },
-        'timestamp': datetime.now().isoformat()
-    }), 200
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in /api/info endpoint: {str(e)}")
+        return jsonify({
+            'error': 'Failed to retrieve API info',
+            'details': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/categories', methods=['GET'])
 def get_categories():
@@ -577,8 +600,12 @@ def get_categories():
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
-        logger.error(f"Error getting categories: {str(e)}")
-        return jsonify({'error': 'Failed to get categories'}), 500
+        logger.error(f"Error in /api/categories endpoint: {str(e)}")
+        return jsonify({
+            'error': 'Failed to get categories',
+            'details': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/artisans', methods=['GET'])
 def get_artisans():
@@ -632,8 +659,12 @@ def get_artisans():
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
-        logger.error(f"Error getting artisans: {str(e)}")
-        return jsonify({'error': 'Failed to get artisans'}), 500
+        logger.error(f"Error in /api/artisans endpoint: {str(e)}")
+        return jsonify({
+            'error': 'Failed to get artisans',
+            'details': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/locations', methods=['GET'])
 def get_locations():
@@ -687,8 +718,12 @@ def get_locations():
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
-        logger.error(f"Error getting locations: {str(e)}")
-        return jsonify({'error': 'Failed to get locations'}), 500
+        logger.error(f"Error in /api/locations endpoint: {str(e)}")
+        return jsonify({
+            'error': 'Failed to get locations',
+            'details': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
