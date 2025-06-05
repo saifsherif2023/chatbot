@@ -410,10 +410,22 @@ Just ask me about any of these topics! For example:
             logger.error(f"Error processing message: {str(e)}")
             return "I apologize, but I encountered an error. Could you please rephrase your question?"
 
-chatbot_service = ChatbotService()
+try:
+    chatbot_service = ChatbotService()
+except Exception as e:
+    logger.critical(f"Failed to initialize ChatbotService: {e}")
+    chatbot_service = None
 
 @app.route('/', methods=['GET'])
 def index():
+    if chatbot_service is None:
+        return jsonify({
+            'status': 'unhealthy',
+            'service': 'chatbot-service',
+            'error': 'Chatbot service is not initialized.',
+            'timestamp': datetime.now().isoformat()
+        }), 503
+    
     try:
         return jsonify({
             'status': 'running',
@@ -421,12 +433,16 @@ def index():
             'version': '1.0.0',
             'timestamp': datetime.now().isoformat()
         }), 200
+    
     except Exception as e:
         logger.error(f"Error in home endpoint: {str(e)}")
         return jsonify({'error': 'Failed to fetch service status'}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat():
+    if chatbot_service is None:
+        return jsonify({"error": "Chatbot service is currently unavailable. Please try again later."}), 503
+    
     try:
         data = request.get_json()
         if not data or 'message' not in data:
@@ -450,6 +466,14 @@ def chat():
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    if chatbot_service is None:
+        return jsonify({
+            'status': 'unhealthy',
+            'service': 'chatbot-service',
+            'error': 'Chatbot service is not initialized.',
+            'timestamp': datetime.now().isoformat()
+        }), 503
+    
     try:
         # Check if spaCy model is loaded
         nlp_status = "loaded" if chatbot_service.nlp is not None else "not loaded"
@@ -502,6 +526,9 @@ def health_check():
 
 @app.route('/api/info', methods=['GET'])
 def api_info():
+    if chatbot_service is None:
+        return jsonify({"error": "Chatbot service is currently unavailable. Please try again later."}), 503
+
     try:
         # Safely get product prices if available, else default to 0
         min_price = float(chatbot_service.products[0]['price']) if chatbot_service.products else 0
@@ -550,6 +577,9 @@ def api_info():
 
 @app.route('/api/categories', methods=['GET'])
 def get_categories():
+    if chatbot_service is None:
+        return jsonify({"error": "Chatbot service is currently unavailable. Please try again later."}), 503
+
     try:
         # Get category statistics
         category_stats = chatbot_service.products_collection.aggregate([
@@ -609,6 +639,9 @@ def get_categories():
 
 @app.route('/api/artisans', methods=['GET'])
 def get_artisans():
+    if chatbot_service is None:
+        return jsonify({"error": "Chatbot service is currently unavailable. Please try again later."}), 503
+
     try:
         # Get artisan statistics
         artisan_stats = chatbot_service.products_collection.aggregate([
@@ -668,6 +701,9 @@ def get_artisans():
 
 @app.route('/api/locations', methods=['GET'])
 def get_locations():
+    if chatbot_service is None:
+        return jsonify({"error": "Chatbot service is currently unavailable. Please try again later."}), 503
+
     try:
         # Get location statistics
         location_stats = chatbot_service.products_collection.aggregate([
