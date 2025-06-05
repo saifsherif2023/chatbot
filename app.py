@@ -11,6 +11,7 @@ from collections import deque
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
+import traceback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class ChatbotService:
         # MongoDB connection
         mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
         self.client = MongoClient(mongo_uri)
-        self.db = self.client[os.getenv("MONGODB_DB", "handmade_crafts")]
+        self.db = self.client[os.getenv("MONGODB_DB", "handmade")]
         self.products_collection = self.db.products
         
         # Load data from MongoDB
@@ -421,7 +422,7 @@ Just ask me about any of these topics! For example:
 try:
     chatbot_service = ChatbotService()
 except Exception as e:
-    logger.critical(f"Failed to initialize ChatbotService: {e}")
+    logger.critical(f"Failed to initialize ChatbotService: {e}\n{traceback.format_exc()}")
     chatbot_service = None
 
 @app.route('/', methods=['GET'])
