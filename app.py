@@ -122,7 +122,7 @@ class ChatbotService:
             "numbers": []
         }
         
-        # Extract numbers for price ranges
+        # Extract numbers to get price ranges
         for token in doc:
             if token.like_num:
                 entities["numbers"].append(float(token.text))
