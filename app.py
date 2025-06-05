@@ -1,8 +1,6 @@
 import os
 import json
 import requests
-import pandas as pd
-import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
@@ -11,6 +9,8 @@ import spacy
 from spacy.matcher import Matcher
 from collections import deque
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson import ObjectId
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,11 +29,17 @@ class ChatbotService:
             spacy.cli.download("en_core_web_sm")
             self.nlp = spacy.load("en_core_web_sm")
         
-        base_dir = os.path.dirname(__file__)
-        self.products_df = pd.read_csv(os.path.join(base_dir, "data", "egyptian_handmade_crafts.csv"))
-        self.categories = self.products_df['category'].unique().tolist()
-        self.locations = self.products_df['location'].unique().tolist()
-        self.artisans = self.products_df['artisan_name'].unique().tolist()
+        # MongoDB connection
+        mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+        self.client = MongoClient(mongo_uri)
+        self.db = self.client[os.getenv("MONGODB_DB", "handmade_crafts")]
+        self.products_collection = self.db.products
+        
+        # Load data from MongoDB
+        self.products = list(self.products_collection.find())
+        self.categories = list(set(product['category']['name'] for product in self.products))
+        self.locations = list(set(product['location'] for product in self.products))
+        self.artisans = list(set(product['artisan'] for product in self.products))
         
         self.matcher = Matcher(self.nlp.vocab)
         self._setup_patterns()
@@ -212,15 +218,14 @@ class ChatbotService:
                 # Filter recommendations to only include products that exist in our dataset
                 valid_recommendations = []
                 for rec in recommendations:
-                    product = self.products_df[self.products_df['prod_id'] == rec.get('prod_id')]
-                    if not product.empty:
-                        product = product.iloc[0]
+                    product = self.products_collection.find_one({"_id": ObjectId(rec.get('_id'))})
+                    if product:
                         valid_recommendations.append({
-                            'prod_id': int(product['prod_id']),
-                            'prod_name': product['prod_name'],
+                            '_id': str(product['_id']),
+                            'title': product['title'],
                             'price': float(product['price']),
-                            'avg_rating': float(product['avg_rating']),
-                            'category': product['category'],
+                            'ratingsAverage': float(product['ratingsAverage']),
+                            'category': product['category']['name'],
                             'description': product['description']
                         })
                 return valid_recommendations
@@ -242,7 +247,7 @@ class ChatbotService:
         response = f"Showing items {start_idx + 1}-{min(end_idx, len(recommendations))} of {len(recommendations)}:\n\n"
         
         for product in recommendations[start_idx:end_idx]:
-            response += f"- {product['prod_name']} ({product['price']} EGP, {product['avg_rating']:.1f} stars)\n"
+            response += f"- {product['title']} ({product['price']} EGP, {product['ratingsAverage']:.1f} stars)\n"
             response += f"  Category: {product['category']}\n"
             response += f"  {product['description'][:100]}...\n\n"
         
@@ -265,35 +270,38 @@ class ChatbotService:
                 response = "Hello! I'm your handmade crafts assistant. I can help you explore our collection of Egyptian handmade crafts and provide personalized recommendations. What would you like to know about?"
             
             elif intent == "recommendation":
-                # Apply filters based on extracted entities
-                filtered_df = self.products_df.copy()
+                # Build MongoDB query based on extracted entities
+                query = {}
                 
                 if entities["price_range"]:
                     min_price, max_price = entities["price_range"]
-                    filtered_df = filtered_df[
-                        (filtered_df['price'] >= min_price) & 
-                        (filtered_df['price'] <= max_price)
-                    ]
+                    query["price"] = {
+                        "$gte": min_price,
+                        "$lte": max_price if max_price != float('inf') else float('inf')
+                    }
                 
                 if entities["categories"]:
-                    filtered_df = filtered_df[filtered_df['category'].isin(entities["categories"])]
+                    query["category.name"] = {"$in": entities["categories"]}
                 
                 if entities["locations"]:
-                    filtered_df = filtered_df[filtered_df['location'].isin(entities["locations"])]
+                    query["location"] = {"$in": entities["locations"]}
                 
                 if entities["artisans"]:
-                    filtered_df = filtered_df[filtered_df['artisan_name'].isin(entities["artisans"])]
+                    query["artisan"] = {"$in": entities["artisans"]}
                 
-                if len(filtered_df) > 0:
-                    # Convert filtered products to recommendation format
+                # Get products from MongoDB
+                products = list(self.products_collection.find(query))
+                
+                if products:
+                    # Convert MongoDB documents to recommendation format
                     recommendations = []
-                    for _, product in filtered_df.iterrows():
+                    for product in products:
                         recommendations.append({
-                            'prod_id': int(product['prod_id']),
-                            'prod_name': product['prod_name'],
+                            '_id': str(product['_id']),
+                            'title': product['title'],
                             'price': float(product['price']),
-                            'avg_rating': float(product['avg_rating']),
-                            'category': product['category'],
+                            'ratingsAverage': float(product['ratingsAverage']),
+                            'category': product['category']['name'],
                             'description': product['description']
                         })
                 else:
@@ -438,9 +446,16 @@ def health_check():
         # Check if spaCy model is loaded
         nlp_status = "loaded" if chatbot_service.nlp is not None else "not loaded"
         
-        # Check if products data is loaded
-        products_loaded = chatbot_service.products_df is not None
-        products_count = len(chatbot_service.products_df) if products_loaded else 0
+        # Check MongoDB connection
+        try:
+            # Ping the MongoDB server
+            chatbot_service.client.admin.command('ping')
+            mongo_status = "connected"
+            products_count = chatbot_service.products_collection.count_documents({})
+        except Exception as e:
+            logger.error(f"MongoDB connection error: {str(e)}")
+            mongo_status = "disconnected"
+            products_count = 0
         
         # Check recommendation service connection
         try:
@@ -451,19 +466,19 @@ def health_check():
             rec_service_status = "disconnected"
         
         return jsonify({
-            'status': 'healthy',
+            'status': 'healthy' if all(status == "connected" for status in [mongo_status, rec_service_status]) else 'unhealthy',
             'service': 'chatbot-service',
             'timestamp': datetime.now().isoformat(),
             'components': {
                 'nlp_model': nlp_status,
-                'recommendation_service': rec_service_status,
-                'data_loaded': products_loaded
+                'mongodb': mongo_status,
+                'recommendation_service': rec_service_status
             },
             'data_statistics': {
                 'products_count': products_count,
-                'categories_count': len(chatbot_service.categories) if products_loaded else 0,
-                'locations_count': len(chatbot_service.locations) if products_loaded else 0,
-                'artisans_count': len(chatbot_service.artisans) if products_loaded else 0
+                'categories_count': len(chatbot_service.categories),
+                'locations_count': len(chatbot_service.locations),
+                'artisans_count': len(chatbot_service.artisans)
             }
         }), 200
     except Exception as e:
@@ -498,11 +513,11 @@ def api_info():
                 'Show me products in the pottery category'
             ],
             'price_ranges': {
-                'min': float(chatbot_service.products_df['price'].min()),
-                'max': float(chatbot_service.products_df['price'].max()),
+                'min': float(chatbot_service.products[0]['price']) if chatbot_service.products else 0,
+                'max': float(chatbot_service.products[-1]['price']) if chatbot_service.products else 0,
                 'currency': 'EGP'
             },
-            'total_products': len(chatbot_service.products_df),
+            'total_products': len(chatbot_service.products),
             'total_categories': len(chatbot_service.categories),
             'total_locations': len(chatbot_service.locations),
             'total_artisans': len(chatbot_service.artisans)
@@ -514,25 +529,47 @@ def api_info():
 def get_categories():
     try:
         # Get category statistics
-        category_stats = chatbot_service.products_df.groupby('category').agg({
-            'prod_id': 'count',
-            'price': ['min', 'max', 'mean'],
-            'avg_rating': 'mean'
-        }).round(2)
+        category_stats = chatbot_service.products_collection.aggregate([
+            {"$group": {
+                "_id": "$category.name",
+                "product_count": {"$sum": 1},
+                "min_price": {"$min": "$price"},
+                "max_price": {"$max": "$price"},
+                "avg_price": {"$avg": "$price"},
+                "avg_rating": {"$avg": "$ratingsAverage"}
+            }},
+            {"$project": {
+                "_id": 0,
+                "name": "$_id",
+                "product_count": 1,
+                "min_price": 1,
+                "max_price": 1,
+                "average_price": {"$round": ["$avg_price", 2]},
+                "average_rating": {"$round": ["$avg_rating", 2]}
+            }}
+        ])
+        
+        # Convert cursor to list to avoid StopIteration
+        stats_list = list(category_stats)
+        stats_dict = {stat['name']: stat for stat in stats_list}
         
         categories = []
         for category in chatbot_service.categories:
-            stats = category_stats.loc[category]
-            categories.append({
-                'name': category,
-                'product_count': int(stats[('prod_id', 'count')]),
-                'price_range': {
-                    'min': float(stats[('price', 'min')]),
-                    'max': float(stats[('price', 'max')]),
-                    'average': float(stats[('price', 'mean')])
-                },
-                'average_rating': float(stats[('avg_rating', 'mean')])
-            })
+            if category in stats_dict:
+                stats = stats_dict[category]
+                min_price = float(stats['min_price']) if stats['min_price'] is not None else 0
+                max_price = float(stats['max_price']) if stats['max_price'] is not None else 0
+                
+                categories.append({
+                    'name': category,
+                    'product_count': int(stats['product_count']),
+                    'price_range': {
+                        'min': min_price,
+                        'max': max_price,
+                        'average': float(stats['average_price']) if stats['average_price'] is not None else 0
+                    },
+                    'average_rating': float(stats['average_rating']) if stats['average_rating'] is not None else 0
+                })
         
         return jsonify({
             'categories': categories,
@@ -547,27 +584,47 @@ def get_categories():
 def get_artisans():
     try:
         # Get artisan statistics
-        artisan_stats = chatbot_service.products_df.groupby('artisan_name').agg({
-            'prod_id': 'count',
-            'price': ['min', 'max', 'mean'],
-            'avg_rating': 'mean',
-            'category': lambda x: list(set(x))
-        }).round(2)
+        artisan_stats = chatbot_service.products_collection.aggregate([
+            {"$group": {
+                "_id": "$artisan",
+                "product_count": {"$sum": 1},
+                "min_price": {"$min": "$price"},
+                "max_price": {"$max": "$price"},
+                "avg_price": {"$avg": "$price"},
+                "avg_rating": {"$avg": "$ratingsAverage"}
+            }},
+            {"$project": {
+                "_id": 0,
+                "name": "$_id",
+                "product_count": 1,
+                "min_price": 1,
+                "max_price": 1,
+                "average_price": {"$round": ["$avg_price", 2]},
+                "average_rating": {"$round": ["$avg_rating", 2]}
+            }}
+        ])
+        
+        # Convert cursor to list to avoid StopIteration
+        stats_list = list(artisan_stats)
+        stats_dict = {stat['name']: stat for stat in stats_list}
         
         artisans = []
         for artisan in chatbot_service.artisans:
-            stats = artisan_stats.loc[artisan]
-            artisans.append({
-                'name': artisan,
-                'product_count': int(stats[('prod_id', 'count')]),
-                'price_range': {
-                    'min': float(stats[('price', 'min')]),
-                    'max': float(stats[('price', 'max')]),
-                    'average': float(stats[('price', 'mean')])
-                },
-                'average_rating': float(stats[('avg_rating', 'mean')]),
-                'categories': stats[('category', '<lambda>')]
-            })
+            if artisan in stats_dict:
+                stats = stats_dict[artisan]
+                min_price = float(stats['min_price']) if stats['min_price'] is not None else 0
+                max_price = float(stats['max_price']) if stats['max_price'] is not None else 0
+                
+                artisans.append({
+                    'name': artisan,
+                    'product_count': int(stats['product_count']),
+                    'price_range': {
+                        'min': min_price,
+                        'max': max_price,
+                        'average': float(stats['average_price']) if stats['average_price'] is not None else 0
+                    },
+                    'average_rating': float(stats['average_rating']) if stats['average_rating'] is not None else 0
+                })
         
         return jsonify({
             'artisans': artisans,
@@ -582,29 +639,47 @@ def get_artisans():
 def get_locations():
     try:
         # Get location statistics
-        location_stats = chatbot_service.products_df.groupby('location').agg({
-            'prod_id': 'count',
-            'price': ['min', 'max', 'mean'],
-            'avg_rating': 'mean',
-            'category': lambda x: list(set(x)),
-            'artisan_name': lambda x: list(set(x))
-        }).round(2)
+        location_stats = chatbot_service.products_collection.aggregate([
+            {"$group": {
+                "_id": "$location",
+                "product_count": {"$sum": 1},
+                "min_price": {"$min": "$price"},
+                "max_price": {"$max": "$price"},
+                "avg_price": {"$avg": "$price"},
+                "avg_rating": {"$avg": "$ratingsAverage"}
+            }},
+            {"$project": {
+                "_id": 0,
+                "name": "$_id",
+                "product_count": 1,
+                "min_price": 1,
+                "max_price": 1,
+                "average_price": {"$round": ["$avg_price", 2]},
+                "average_rating": {"$round": ["$avg_rating", 2]}
+            }}
+        ])
+        
+        # Convert cursor to list to avoid StopIteration
+        stats_list = list(location_stats)
+        stats_dict = {stat['name']: stat for stat in stats_list}
         
         locations = []
         for location in chatbot_service.locations:
-            stats = location_stats.loc[location]
-            locations.append({
-                'name': location,
-                'product_count': int(stats[('prod_id', 'count')]),
-                'price_range': {
-                    'min': float(stats[('price', 'min')]),
-                    'max': float(stats[('price', 'max')]),
-                    'average': float(stats[('price', 'mean')])
-                },
-                'average_rating': float(stats[('avg_rating', 'mean')]),
-                'categories': stats[('category', '<lambda>')],
-                'artisans': stats[('artisan_name', '<lambda>')]
-            })
+            if location in stats_dict:
+                stats = stats_dict[location]
+                min_price = float(stats['min_price']) if stats['min_price'] is not None else 0
+                max_price = float(stats['max_price']) if stats['max_price'] is not None else 0
+                
+                locations.append({
+                    'name': location,
+                    'product_count': int(stats['product_count']),
+                    'price_range': {
+                        'min': min_price,
+                        'max': max_price,
+                        'average': float(stats['average_price']) if stats['average_price'] is not None else 0
+                    },
+                    'average_rating': float(stats['average_rating']) if stats['average_rating'] is not None else 0
+                })
         
         return jsonify({
             'locations': locations,
