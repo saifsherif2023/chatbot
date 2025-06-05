@@ -38,9 +38,24 @@ class ChatbotService:
         
         # Load data from MongoDB
         self.products = list(self.products_collection.find())
-        self.categories = list(set(product['category']['name'] for product in self.products))
-        self.locations = list(set(product['location'] for product in self.products))
-        self.artisans = list(set(product['artisan'] for product in self.products))
+        
+        self.categories = list(set(
+            product['category']['name']
+            for product in self.products
+            if isinstance(product.get('category'), dict) and 'name' in product['category']
+        ))
+
+        self.locations = list(set(
+            product['location']
+            for product in self.products
+            if isinstance(product.get('location'), str)
+        ))
+
+        self.artisans = list(set(
+            product['artisan']
+            for product in self.products
+            if isinstance(product.get('artisan'), str)
+        ))
         
         self.matcher = Matcher(self.nlp.vocab)
         self._setup_patterns()
