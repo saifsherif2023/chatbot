@@ -67,6 +67,14 @@ class ChatbotService:
         
         self.recommendation_service_url = os.getenv("RECOMMENDATION_SERVICE_URL", "http://localhost:5000")
 
+    def is_mongo_connected(self):
+        try:
+            # Ping the database to check connection
+            self.client.admin.command('ping')
+            return True
+        except Exception:
+            return False
+
     def _setup_patterns(self):
         price_patterns = [
             [{"LOWER": {"IN": ["under", "less", "below"]}}, {"LIKE_NUM": True}],
@@ -420,23 +428,24 @@ except Exception as e:
 def index():
     if chatbot_service is None:
         return jsonify({
-            'status': 'unhealthy',
-            'service': 'chatbot-service',
-            'error': 'Chatbot service is not initialized.',
-            'timestamp': datetime.now().isoformat()
-        }), 503
-    
-    try:
-        return jsonify({
-            'status': 'running',
-            'service': 'chatbot-service',
-            'version': '1.0.0',
-            'timestamp': datetime.now().isoformat()
-        }), 200
-    
-    except Exception as e:
-        logger.error(f"Error in home endpoint: {str(e)}")
-        return jsonify({'error': 'Failed to fetch service status'}), 500
+            "message": "Chatbot service failed to initialize.",
+            "service": "chatbot-service",
+            "status": "error"
+        }), 500
+
+    if chatbot_service.is_mongo_connected():
+        response = {
+            "message": "Chatbot service running. Database is connected.",
+            "service": "chatbot-service",
+            "status": "running"
+        }
+    else:
+        response = {
+            "message": "Chatbot service running. Waiting for database setup.",
+            "service": "chatbot-service",
+            "status": "waiting"
+        }
+    return jsonify(response)
 
 @app.route('/chat', methods=['POST'])
 def chat():
